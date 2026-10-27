@@ -180,8 +180,25 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # Parser unit tests on Linux (libusb stubbed): crafted USB transfers through
+  # PassThruReadMsgs, with AddressSanitizer/UBSan.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout J2534 driver source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Install libusb headers
+        run: sudo apt-get update -q && sudo apt-get install -y -q libusb-1.0-0-dev
+
+      - name: Build and run tests/test_readmsgs.c
+        run: |
+          gcc -g -fsanitize=address,undefined -fno-sanitize-recover=all -w -Ij2534 \
+            $(pkg-config --cflags libusb-1.0) tests/test_readmsgs.c -o test_readmsgs
+          ./test_readmsgs
+
   package:
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-24.04
     permissions:
       contents: write   # only used by the draft-release step
