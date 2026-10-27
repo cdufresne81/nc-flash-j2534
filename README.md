@@ -30,7 +30,7 @@ Get the zip for your program's bitness from
 | Zip | For | Status |
 |---|---|---|
 | `nc-flash-j2534-<ver>-x64.zip` | 64-bit programs (NC Flash) | Used by NC Flash. |
-| `nc-flash-j2534-<ver>-x86.zip` | 32-bit programs (RomDrop) | **Experimental: not yet flash-tested with RomDrop.** |
+| `nc-flash-j2534-<ver>-x86.zip` | 32-bit programs (RomDrop) | Tested with RomDrop (read, full flash, dynamic flash) on a bench ECU. |
 
 Each zip contains `j2534.dll`, `libusb-1.0.dll`, the two licences,
 `SOURCES.txt` (the exact commits and the CI run that built it) and
@@ -72,12 +72,13 @@ romdrop.exe
 Leave it unset (or set it to `0`) for normal use. The log grows quickly during a
 flash.
 
-## 3. Using it with RomDrop (experimental)
+## 3. Using it with RomDrop
 
 > [!WARNING]
-> The x86 build has not yet completed a RomDrop read or flash. A failed flash
-> can brick an ECU. Only try it if you have a recovery path (e.g. NC Flash x64
-> on the same WinUSB cable), and run with `J2534_OP2_LOG` set.
+> The x86 build has been tested with RomDrop (read, full flash and dynamic
+> flash) on a bench ECU. Flashing an ECU always carries risk: keep a recovery
+> path (e.g. NC Flash x64 on the same WinUSB cable), and if anything goes
+> wrong, set `J2534_OP2_LOG` and keep the log.
 
 RomDrop is a 32-bit program. It loads `op20pt32.dll` by name, so a copy in its
 own folder is used instead of the Tactrix one in `SysWOW64`. RomDrop never
