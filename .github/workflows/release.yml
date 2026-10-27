@@ -93,19 +93,41 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
           if (-not $dumpbin) { throw "dumpbin.exe not found" }
-          $expected = 'Open Close Connect Disconnect ReadMsgs WriteMsgs StartPeriodicMsg StopPeriodicMsg StartMsgFilter StopMsgFilter SetProgrammingVoltage ReadVersion GetLastError Ioctl'.Split(' ') | ForEach-Object { "PassThru$_" }
+          # Export name -> x86 __stdcall argument bytes (J2534 04.04: every parameter is 4 bytes).
+          $argBytes = [ordered]@{
+            PassThruOpen = 8; PassThruClose = 4; PassThruConnect = 20; PassThruDisconnect = 4
+            PassThruReadMsgs = 16; PassThruWriteMsgs = 16; PassThruStartPeriodicMsg = 16
+            PassThruStopPeriodicMsg = 8; PassThruStartMsgFilter = 24; PassThruStopMsgFilter = 8
+            PassThruSetProgrammingVoltage = 12; PassThruReadVersion = 16; PassThruGetLastError = 4
+            PassThruIoctl = 16
+          }
+          $expected = @($argBytes.Keys)
           $fail = $false
 
           Write-Host "===== dumpbin /exports dist\j2534.dll (${{ matrix.arch }}) ====="
           $exp = & $dumpbin /nologo /exports dist\j2534.dll
           if ($LASTEXITCODE) { throw "dumpbin /exports failed" }
           $exp | Write-Host
-          $names = @($exp | ForEach-Object { if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)') { $Matches[1] } })
+          $syms = [ordered]@{}
+          foreach ($line in $exp) {
+            if ($line -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)(?:\s+=\s+(\S+))?') {
+              $syms[$Matches[1]] = if ($Matches[2]) { $Matches[2] } else { $Matches[1] }
+            }
+          }
+          $names = @($syms.Keys)
           $missing = @($expected | Where-Object { $names -cnotcontains $_ })
           $extra = @($names | Where-Object { $expected -cnotcontains $_ })
           if ($missing) { Write-Host "::error::missing exports: $($missing -join ', ')"; $fail = $true }
           if ($extra) { Write-Host "::error::unexpected (e.g. decorated) exports: $($extra -join ', ')"; $fail = $true }
           if (-not $missing -and -not $extra) { Write-Host "OK: exactly the 14 J2534 functions, undecorated" }
+          # The symbol behind each name proves the calling convention: on x86 it must be
+          # _Name@N (__stdcall with N argument bytes); _Name alone would be cdecl.
+          foreach ($n in $expected) {
+            if (-not $syms.Contains($n)) { continue }
+            $want = if ('${{ matrix.arch }}' -eq 'x86') { "_$n@$($argBytes[$n])" } else { $n }
+            if ($syms[$n] -cne $want) { Write-Host "::error::$n resolves to $($syms[$n]), expected $want"; $fail = $true }
+          }
+          if (-not $fail) { Write-Host "OK: every export resolves to the expected ${{ matrix.arch }} symbol (x86: __stdcall _Name@N)" }
 
           foreach ($dll in 'j2534.dll', 'libusb-1.0.dll') {
             $hdr = & $dumpbin /nologo /headers "dist\$dll"
@@ -124,9 +146,10 @@ jobs:
           python-version: '3.12'
           architecture: ${{ matrix.arch }}
 
-      # WinDLL = __stdcall. On x86, ctypes raises if the callee's stack cleanup does
-      # not match, so this also proves the calling convention. No cable on the
-      # runner: PassThruOpen must fail cleanly with ERR_DEVICE_NOT_CONNECTED (8).
+      # Loads the DLL (and libusb next to it) in a process of the same bitness and
+      # resolves the 14 names. This does NOT prove __stdcall: CPython's ctypes/libffi
+      # restores the stack either way. The dumpbin step above checks that (_Name@N).
+      # No cable on the runner: PassThruOpen must fail with ERR_DEVICE_NOT_CONNECTED (8).
       - name: Load test (${{ matrix.arch }} Python ctypes)
         shell: pwsh
         run: |
