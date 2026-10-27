@@ -17,7 +17,7 @@
   Tactrix to WinUSB.  The easiest way to complete this is to use Zadig (https://zadig.akeo.ie/).
 
   To enable runtime debug logging to a file, create an environment variable
-  with the name LOG_ENABLE and set it to the path and filename to write to.
+  with the name J2534_OP2_LOG and set it to the path and filename to write to.
   To enable libusb messages, create a LIBUSB_DEBUG environment variable and set libusb
   message verbosity:
 	NONE = 0, ERROR = 1, WARNING = 2, INFO = 3, DEBUG = 4
@@ -33,6 +33,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// A USB write never waits longer than this, even when no reply is expected.
+#define SEND_TIMEOUT_MS 5000
 
 #ifdef _MSC_VER
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) { return TRUE; }
@@ -287,6 +290,19 @@ static int open_dev_endpoints(libusb_device **devs, const ssize_t cnt,
 }
 
 /*
+  Undo a partial PassThruOpen so the next one starts from a clean state.
+ */
+static void open_failed(void)
+{
+	if (con->dev_handle != NULL)
+		libusb_close(con->dev_handle);
+	con->dev_handle = NULL;
+	if (con->ctx != NULL)
+		libusb_exit(con->ctx);
+	con->ctx = NULL;
+}
+
+/*
   Error map, convert a libusb error code value to a PassThru error code.
 */
 static int error_map(const int usb_err)
@@ -469,7 +485,7 @@ static int usb_send_expect(uint8_t *data, const size_t len,
 	if (len > 0 && len <= (size_t)capacity)
 	{
 		r = libusb_bulk_transfer(con->dev_handle, endpoint->addr_out,
-			data, (int)len, &bytes_written, timeout);
+			data, (int)len, &bytes_written, timeout ? timeout : SEND_TIMEOUT_MS);
 		if (write_log)
 		{
 			writelog("\tUSB stream Sent:\n\t\t");
@@ -583,7 +599,7 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 		return J2534_ERR_NULL_PARAMETER;
 	}
 
-	const char *le = getenv("LOG_ENABLE");
+	const char *le = getenv("J2534_OP2_LOG");
 	if (le)
 	{
 		if (le[0] == '0')
@@ -605,6 +621,14 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 		writelog("\n");
 	}
 
+	// Only one open device per process: a second open would replace the libusb
+	// context and handle under the live connection.
+	if (con->dev_handle != NULL)
+	{
+		snprintf(LAST_ERROR, LE_LEN, "Error: device already open");
+		return J2534_ERR_DEVICE_IN_USE;
+	}
+
 	con->ctx = NULL;	// use default context
 	int r = libusb_init(&con->ctx);
 	if (r != LIBUSB_SUCCESS)
@@ -616,7 +640,7 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 			writelog(log_msg);
 		}
 		snprintf(LAST_ERROR, LE_LEN, "Error initializing USB library: %s", libusb_error_name(r));
-		libusb_exit(con->ctx);
+		open_failed();
 		return error_map(r);
 	}
 
@@ -627,7 +651,7 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 		if (write_log)
 			writelog("\tError getting device list\n");
 		snprintf(LAST_ERROR, LE_LEN, "Error getting USB device list");
-		libusb_exit(con->ctx);
+		open_failed();
 		return J2534_ERR_DEVICE_NOT_CONNECTED;
 	}
 
@@ -641,7 +665,7 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 			writelog(log_msg);
 		}
 		snprintf(LAST_ERROR, LE_LEN, "Cannot find device: %s", libusb_error_name(r));
-		libusb_exit(con->ctx);
+		open_failed();
 		return J2534_ERR_DEVICE_NOT_CONNECTED;
 	}
 
@@ -650,7 +674,7 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 		if (write_log)
 			writelog("\tCannot open device handle\n");
 		snprintf(LAST_ERROR, LE_LEN, "Cannot open device handle (disconnected?)");
-		libusb_exit(con->ctx);
+		open_failed();
 		return J2534_ERR_DEVICE_NOT_CONNECTED;
 	}
 	else
@@ -680,8 +704,7 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 		if (write_log)
 			writelog("\tCannot Claim Interface\n");
 		snprintf(LAST_ERROR, LE_LEN, "Cannot claim interface from kernel driver");
-		libusb_close(con->dev_handle);
-		libusb_exit(con->ctx);
+		open_failed();
 		return error_map(r);
 	}
 	if (write_log)
@@ -734,11 +757,15 @@ int32_t PassThruClose(const unsigned long DeviceID)
 		r = libusb_release_interface(con->dev_handle, endpoint->intf_num);
 		libusb_close(con->dev_handle);
 		libusb_exit(con->ctx);
+		con->dev_handle = NULL;
+		con->ctx = NULL;
 
 		if (write_log)
 		{
 			writelog("Closed\n");
 			fclose(logfile);
+			logfile = NULL;
+			write_log = FALSE;
 		}
 	}
 	return r;
@@ -1041,11 +1068,15 @@ int32_t PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_MSG *pMsg,
 							{
 								msgBuf->Timestamp = parse_ts(data + pos);
 								// The OpenPort repeats the 4-byte CAN ID at the start of every USB
-								// chunk of a long ISO15765 message; keep it only from the first chunk.
-								uint32_t skip = (channel_id == ISO15765 && msgBuf->DataSize > 0) ? 8 : 4;
-								uint32_t avail = (uint32_t)data[len] - 1;
+								// chunk of a long ISO15765 message; keep it only from the first chunk
+								// (skipped only when it matches the ID already stored).
+								uint32_t skip = 4;
+								if (channel_id == ISO15765 && msgBuf->DataSize >= 4 && data[len] >= 9
+									&& memcmp(data + pos + 4, msgBuf->Data, 4) == 0)
+									skip = 8;
+								uint32_t avail = data[len] ? (uint32_t)data[len] - 1 : 0;
 								dataSize = msgBuf->DataSize;
-								if (avail > skip)
+								if (avail > skip && pos + avail <= (uint32_t)bytes_read)
 								{
 									datacopy(msgBuf, data, skip, pos, avail);
 									dataSize += avail - skip;
@@ -1112,11 +1143,15 @@ int32_t PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_MSG *pMsg,
 							if (channel_id == CAN || channel_id == ISO15765)	// CAN message
 							{
 								// The OpenPort repeats the 4-byte CAN ID at the start of every USB
-								// chunk of a long ISO15765 message; keep it only from the first chunk.
-								uint32_t skip = (channel_id == ISO15765 && msgBuf->DataSize > 0) ? 8 : 4;
-								uint32_t avail = (uint32_t)data[len] - 1;
+								// chunk of a long ISO15765 message; keep it only from the first chunk
+								// (skipped only when it matches the ID already stored).
+								uint32_t skip = 4;
+								if (channel_id == ISO15765 && msgBuf->DataSize >= 4 && data[len] >= 9
+									&& memcmp(data + pos + 4, msgBuf->Data, 4) == 0)
+									skip = 8;
+								uint32_t avail = data[len] ? (uint32_t)data[len] - 1 : 0;
 								dataSize = msgBuf->DataSize;
-								if (avail > skip)
+								if (avail > skip && pos + avail <= (uint32_t)bytes_read)
 								{
 									datacopy(msgBuf, data, skip, pos, avail);
 									dataSize += avail - skip;
@@ -1544,7 +1579,8 @@ int32_t PassThruGetLastError(char *pErrorDescription)
 			writelog("NULL");
 		return J2534_ERR_NULL_PARAMETER;
 	}
-	pErrorDescription = LAST_ERROR;
+	strncpy(pErrorDescription, LAST_ERROR, 80);	// J2534: an 80-char buffer
+	pErrorDescription[79] = '\0';
 	if (write_log)
 	{
 		writelog(pErrorDescription);
