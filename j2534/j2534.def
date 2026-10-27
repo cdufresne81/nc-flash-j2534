@@ -1,0 +1,19 @@
+LIBRARY j2534
+; Plain (undecorated) names for the J2534 API. Hosts look these up with
+; GetProcAddress; without this file the x86 __stdcall exports are decorated
+; (_PassThruOpen@8) and the lookup fails.
+EXPORTS
+    PassThruOpen
+    PassThruClose
+    PassThruConnect
+    PassThruDisconnect
+    PassThruReadMsgs
+    PassThruWriteMsgs
+    PassThruStartPeriodicMsg
+    PassThruStopPeriodicMsg
+    PassThruStartMsgFilter
+    PassThruStopMsgFilter
+    PassThruSetProgrammingVoltage
+    PassThruReadVersion
+    PassThruGetLastError
+    PassThruIoctl

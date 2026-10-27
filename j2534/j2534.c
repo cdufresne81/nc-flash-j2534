@@ -591,7 +591,7 @@ static int usb_send_expect(uint8_t *data, const size_t len,
 /*
   Establish a connection with a PassThru device.
  */
-int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
+int32_t OP2J2534_CALL PassThruOpen(const void *pName, unsigned long *pDeviceID)
 {
 	if (pDeviceID == NULL)
 	{
@@ -735,7 +735,7 @@ int32_t PassThruOpen(const void *pName, unsigned long *pDeviceID)
 /*
   Terminate a connection with a Pass-Thru device.
  */
-int32_t PassThruClose(const unsigned long DeviceID)
+int32_t OP2J2534_CALL PassThruClose(const unsigned long DeviceID)
 {
 	if (write_log)
 	{
@@ -774,7 +774,7 @@ int32_t PassThruClose(const unsigned long DeviceID)
 /*
   Establish a connection using a protocol channel.
  */
-int32_t PassThruConnect(const unsigned long DeviceID, const unsigned long protocolID,
+int32_t OP2J2534_CALL PassThruConnect(const unsigned long DeviceID, const unsigned long protocolID,
 	const unsigned long flags, const unsigned long baud, unsigned long *pChannelID)
 {
 	if (write_log)
@@ -826,7 +826,7 @@ int32_t PassThruConnect(const unsigned long DeviceID, const unsigned long protoc
 /*
   Terminate a connection with a protocol channel.
  */
-int32_t PassThruDisconnect(const unsigned long ChannelID)
+int32_t OP2J2534_CALL PassThruDisconnect(const unsigned long ChannelID)
 {
 	if (write_log)
 	{
@@ -855,7 +855,7 @@ int32_t PassThruDisconnect(const unsigned long ChannelID)
 /*
   Read message(s) from a protocol channel.
  */
-int32_t PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_MSG *pMsg,
+int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_MSG *pMsg,
 	unsigned long *pNumMsgs, const unsigned long Timeout)
 {
 	if (pMsg == NULL)
@@ -1280,7 +1280,7 @@ int32_t PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_MSG *pMsg,
 /*
   Write message(s) to a protocol channel.
  */
-int32_t PassThruWriteMsgs(const unsigned long ChannelID, const PASSTHRU_MSG *pMsg,
+int32_t OP2J2534_CALL PassThruWriteMsgs(const unsigned long ChannelID, const PASSTHRU_MSG *pMsg,
 	unsigned long *pNumMsgs, const unsigned long timeInterval)
 {
 	if (write_log)
@@ -1336,7 +1336,7 @@ int32_t PassThruWriteMsgs(const unsigned long ChannelID, const PASSTHRU_MSG *pMs
 /*
   Start sending a message at a specified time interval on a protocol channel.
  */
-int32_t PassThruStartPeriodicMsg(const unsigned long ChannelID, const PASSTHRU_MSG *pMsg,
+int32_t OP2J2534_CALL PassThruStartPeriodicMsg(const unsigned long ChannelID, const PASSTHRU_MSG *pMsg,
 	const unsigned long *pMsgID, const unsigned long timeInterval)
 {
 	if (write_log)
@@ -1347,7 +1347,7 @@ int32_t PassThruStartPeriodicMsg(const unsigned long ChannelID, const PASSTHRU_M
 /*
   Stop a periodic message.
  */
-int32_t PassThruStopPeriodicMsg(const unsigned long ChannelID, const unsigned long msgID)
+int32_t OP2J2534_CALL PassThruStopPeriodicMsg(const unsigned long ChannelID, const unsigned long msgID)
 {
 	if (write_log)
 		writelog("StopPeriodic, not supported\n");
@@ -1357,7 +1357,7 @@ int32_t PassThruStopPeriodicMsg(const unsigned long ChannelID, const unsigned lo
 /*
   Start filtering incoming messages on a protocol channel.
  */
-int32_t PassThruStartMsgFilter(const unsigned long ChannelID, const unsigned long FilterType,
+int32_t OP2J2534_CALL PassThruStartMsgFilter(const unsigned long ChannelID, const unsigned long FilterType,
 	const PASSTHRU_MSG *pMaskMsg, const PASSTHRU_MSG *pPatternMsg,
 	const PASSTHRU_MSG *pFlowControlMsg, unsigned long *pMsgID)
 {
@@ -1468,7 +1468,7 @@ int32_t PassThruStartMsgFilter(const unsigned long ChannelID, const unsigned lon
 /*
   Stops filtering incoming messages on a protocol channel.
  */
-int32_t PassThruStopMsgFilter(const unsigned long ChannelID, const unsigned long msgID)
+int32_t OP2J2534_CALL PassThruStopMsgFilter(const unsigned long ChannelID, const unsigned long msgID)
 {
 	if (write_log)
 	{
@@ -1500,7 +1500,7 @@ int32_t PassThruStopMsgFilter(const unsigned long ChannelID, const unsigned long
 /*
   Set a programming voltage on a specific pin.
  */
-int32_t PassThruSetProgrammingVoltage(const unsigned long DeviceID,
+int32_t OP2J2534_CALL PassThruSetProgrammingVoltage(const unsigned long DeviceID,
 	const unsigned long pinNumber, const unsigned long voltage)
 {
 	if (write_log)
@@ -1511,7 +1511,7 @@ int32_t PassThruSetProgrammingVoltage(const unsigned long DeviceID,
 /*
   Reads the version information of the firmware, this DLL and API implmentation.
  */
-int32_t PassThruReadVersion(const unsigned long DeviceID, char *pFirmwareVersion,
+int32_t OP2J2534_CALL PassThruReadVersion(const unsigned long DeviceID, char *pFirmwareVersion,
 	char *pDllVersion, char *pApiVersion)
 {
 	if (pFirmwareVersion == NULL || pDllVersion == NULL
@@ -1569,7 +1569,7 @@ int32_t PassThruReadVersion(const unsigned long DeviceID, char *pFirmwareVersion
 /*
   Gets the text description of the last error.
  */
-int32_t PassThruGetLastError(char *pErrorDescription)
+int32_t OP2J2534_CALL PassThruGetLastError(char *pErrorDescription)
 {
 	if (write_log)
 		writelog("GetLastError\n\t|\n\tErrorDescription:\t");
@@ -1594,7 +1594,7 @@ int32_t PassThruGetLastError(char *pErrorDescription)
   protocol configuration parameters (e.g. initialization,
   baud rates, programming voltages, etc.).
  */
-int32_t PassThruIoctl(const unsigned long ChannelID, const unsigned long ioctlID,
+int32_t OP2J2534_CALL PassThruIoctl(const unsigned long ChannelID, const unsigned long ioctlID,
 	const void *pInput, void *pOutput)
 {
 	if (write_log)
