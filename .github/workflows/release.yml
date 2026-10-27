@@ -264,12 +264,12 @@ jobs:
           | File | What it is |
           |---|---|
           | \`nc-flash-j2534-$VER-x64.zip\` | 64-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 64-bit programs (NC Flash). |
-          | \`nc-flash-j2534-$VER-x86.zip\` | 32-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 32-bit programs (RomDrop). **Experimental: not yet flash-tested with RomDrop.** |
+          | \`nc-flash-j2534-$VER-x86.zip\` | 32-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 32-bit programs (RomDrop). Tested with RomDrop: read and full flash. |
           | \`$src\` | Exact libusb source the DLLs were built from (LGPL-2.1). |
           | \`SHA256SUMS.txt\` | SHA-256 of every file above. Each zip also has its own \`SHA256SUMS.txt\` and \`SOURCES.txt\`. |
 
           > [!WARNING]
-          > This driver is used to flash engine ECUs. The x86 build has **not yet completed a RomDrop read or flash**. Use it with RomDrop at your own risk, and only with a known-good recovery path (e.g. NC Flash x64 on the same cable).
+          > This driver is used to flash engine ECUs. Flashing always carries risk: keep a known-good recovery path (e.g. NC Flash x64 on the same cable) and, if anything goes wrong, set \`J2534_OP2_LOG\` and keep the log.
 
           Requirements: the cable must be bound to **WinUSB** (NC Flash: Settings > ECU > J2534 > Tactrix OpenPort Driver; manually: Zadig, USB ID 0403:CC4D -> WinUSB). One program at a time can open the cable. No Visual C++ runtime is needed. Nothing is installed system-wide: put the DLLs next to the program that loads them.
 
