@@ -48,15 +48,18 @@ static const uint8_t DATA_CHUNK[] = { 'a','r','6', 11, 0x00, 0,0,0,2, 0,0,0x07,0
 static const uint8_t END_IND[]    = { 'a','r','6', 9, 0x40, 0,0,0,3, 0,0,0x07,0xE8 };
 
 static PASSTHRU_MSG msgs[4];
+static unsigned long chan_id = 6;	/* ChannelID passed to ReadMsgs (con->channel is its ASCII digit) */
 static int run(const char *name, int nx, const xfer_t *x, unsigned long want_n, int32_t *rc_out)
 {
+	if (strstr(name, "...") == NULL)
+		flush_queue();	/* a new case starts with an empty receive queue */
 	qn = nx; qi = 0; reads = 0;
 	for (int i = 0; i < nx; i++) q[i] = x[i];
 	unsigned long n = want_n;
 	memset(msgs, 0, sizeof msgs);
 	LAST_ERROR[0] = '\0';
 	alarm(5);
-	int32_t rc = PassThruReadMsgs(6, msgs, &n, 5000);
+	int32_t rc = PassThruReadMsgs(chan_id, msgs, &n, 5000);
 	alarm(0);
 	printf("%-34s rc=%d n=%lu usb_reads=%d", name, rc, n, reads);
 	if (n) printf(" msg0: RxStatus=%lu DataSize=%lu", msgs[0].RxStatus, msgs[0].DataSize);
@@ -170,6 +173,118 @@ int main(void)
 	  CHECK(rc == 0 && n == 1 && msgs[0].DataSize == 6 && msgs[0].Data[4] == 0x76);
 	  n = run("14 ... next call", 0, NULL, 1, &rc);
 	  CHECK(n == 0 && rc == J2534_ERR_TIMEOUT); }
+
+	/* Malformed or truncated packets must be skipped without reading past the
+	   received data (ASan catches any overread), and must not hide later packets. */
+	{ static const uint8_t TXDONE_LEN0[] = { 'a','r','6', 0 };
+	  uint8_t b[64]; int k = 0; memcpy(b+k, TXDONE_LEN0, sizeof TXDONE_LEN0); k += sizeof TXDONE_LEN0;
+	  memcpy(b+k, START_IND, sizeof START_IND); k += sizeof START_IND;
+	  n = run("16 len-0 packet + start ind", 1, (xfer_t[]){{b, k}}, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].RxStatus == 2); }
+
+	{ static const uint8_t START_LEN2[] = { 'a','r','6', 2, 0x80, 0 };	/* no room for a timestamp */
+	  uint8_t b[64]; int k = 0; memcpy(b+k, START_LEN2, sizeof START_LEN2); k += sizeof START_LEN2;
+	  memcpy(b+k, START_IND, sizeof START_IND); k += sizeof START_IND;
+	  n = run("17 short start ind + start ind", 1, (xfer_t[]){{b, k}}, 1, &rc);
+	  /* the short one is parsed from the bytes it has (no CAN ID): no wrapped DataSize */
+	  CHECK(rc == 0 && n == 1 && msgs[0].RxStatus == 2 && msgs[0].DataSize == 0);
+	  n = run("17 ... next call (queued start ind)", 0, NULL, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].RxStatus == 2 && msgs[0].DataSize == 4); }
+
+	/* cut-off start indication: parsed from the 3 bytes that arrived, nothing read beyond */
+	n = run("18 start ind cut at end of transfer", 1, (xfer_t[]){{START_IND, 7}}, 1, &rc);
+	CHECK(rc == 0 && n == 1 && msgs[0].RxStatus == 2 && msgs[0].DataSize == 0 && msgs[0].Timestamp == 0);
+
+	{ static const uint8_t END_LEN0_AT_END[] = { 'a','r','6', 0x40 };	/* len byte claims 64 bytes */
+	  n = run("19 header claims more than received", 1,
+		(xfer_t[]){{END_LEN0_AT_END, sizeof END_LEN0_AT_END}}, 1, &rc);
+	  CHECK(n == 0 && rc == J2534_ERR_TIMEOUT); }
+
+	/* K-line data chunks carry no timestamp and may be shorter than 5 bytes:
+	   they must still be parsed. */
+	{ static const uint8_t K_CHUNK[] = { 'a','r','3', 3, 0x00, 0x11, 0x22 };
+	  static const uint8_t K_END[] = { 'a','r','3', 5, 0x40, 0,0,0,4 };
+	  uint8_t b[64]; int k = 0; memcpy(b+k, K_CHUNK, sizeof K_CHUNK); k += sizeof K_CHUNK;
+	  memcpy(b+k, K_END, sizeof K_END); k += sizeof K_END;
+	  con->channel = '3'; chan_id = 3;
+	  n = run("20 K-line short chunk + end ind", 1, (xfer_t[]){{b, k}}, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].DataSize == 2 && msgs[0].Data[0] == 0x11 && msgs[0].Data[1] == 0x22);
+	  con->channel = '6'; chan_id = 6; }
+
+	/* With the caller's array full (count 1), whatever follows a complete reply
+	   in the same transfer must not hide it: no empty queued message, no stub. */
+	{ uint8_t b[64]; int k = 0; memcpy(b+k, DATA_CHUNK, sizeof DATA_CHUNK); k += sizeof DATA_CHUNK;
+	  memcpy(b+k, END_IND, sizeof END_IND); k += sizeof END_IND;
+	  memcpy(b+k, START_IND, 7); k += 7;	/* start indication cut off */
+	  n = run("21 reply + cut-off start ind, want 1", 1, (xfer_t[]){{b, k}}, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].DataSize == 6 && msgs[0].Data[4] == 0x76);
+	  n = run("21 ... next call", 0, NULL, 1, &rc);	/* the cut-off packet, as parsed: no stub */
+	  CHECK(rc == 0 && n == 1 && msgs[0].RxStatus == 2 && msgs[0].DataSize == 0 && msgs[0].ProtocolID == 6); }
+
+	{ static const uint8_t SHORT[] = { 'a','r','6', 2, 0x80, 0 };
+	  uint8_t b[64]; int k = 0; memcpy(b+k, DATA_CHUNK, sizeof DATA_CHUNK); k += sizeof DATA_CHUNK;
+	  memcpy(b+k, END_IND, sizeof END_IND); k += sizeof END_IND;
+	  memcpy(b+k, SHORT, sizeof SHORT); k += sizeof SHORT;
+	  n = run("22 reply + short packet, want 1", 1, (xfer_t[]){{b, k}}, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].DataSize == 6 && msgs[0].Data[4] == 0x76);
+	  n = run("22 ... next call", 0, NULL, 1, &rc);	/* the cut-off packet, as parsed: no stub */
+	  CHECK(rc == 0 && n == 1 && msgs[0].RxStatus == 2 && msgs[0].DataSize == 0 && msgs[0].ProtocolID == 6); }
+
+	{ static const uint8_t UNKNOWN[] = { 'a','r','6', 5, 0x77, 0,0,0,9 };
+	  uint8_t b[64]; int k = 0; memcpy(b+k, DATA_CHUNK, sizeof DATA_CHUNK); k += sizeof DATA_CHUNK;
+	  memcpy(b+k, END_IND, sizeof END_IND); k += sizeof END_IND;
+	  memcpy(b+k, UNKNOWN, sizeof UNKNOWN); k += sizeof UNKNOWN;
+	  memcpy(b+k, START_IND, sizeof START_IND); k += sizeof START_IND;
+	  n = run("23 reply + unknown + start ind, want 1", 1, (xfer_t[]){{b, k}}, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].DataSize == 6);
+	  n = run("23 ... next call (queued start ind)", 0, NULL, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].RxStatus == 2 && msgs[0].DataSize == 4); }
+
+	/* An end indication split across two transfers still completes the reply. */
+	{ uint8_t b[64]; int k = 0; memcpy(b+k, DATA_CHUNK, sizeof DATA_CHUNK); k += sizeof DATA_CHUNK;
+	  memcpy(b+k, END_IND, 10); k += 10;
+	  n = run("24 chunk + end ind split | rest", 2,
+		(xfer_t[]){{b, k}, {END_IND + 10, sizeof END_IND - 10}}, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].DataSize == 6 && msgs[0].Data[4] == 0x76); }
+
+	/* K-line chunk with only a type byte: nothing to copy, nothing read out of bounds. */
+	{ static const uint8_t K_CHUNK1[] = { 'a','r','3', 1, 0x00 };
+	  static const uint8_t K_END[] = { 'a','r','3', 5, 0x40, 0,0,0,4 };
+	  uint8_t b[64]; int k = 0; memcpy(b+k, K_CHUNK1, sizeof K_CHUNK1); k += sizeof K_CHUNK1;
+	  memcpy(b+k, K_END, sizeof K_END); k += sizeof K_END;
+	  con->channel = '3'; chan_id = 3;
+	  n = run("25 K-line len-1 chunk + end ind", 1, (xfer_t[]){{b, k}}, 1, &rc);
+	  CHECK(rc == 0 && n == 1 && msgs[0].DataSize == 0);
+	  con->channel = '6'; chan_id = 6; }
+
+	/* More chunk data than a PASSTHRU_MSG holds: DataSize stops at PM_DATA_LEN and
+	   nothing is written past the message (msgs[1] keeps its sentinel). */
+	{ static uint8_t big[3][4096]; xfer_t xs[4]; int nx = 0, c = 0;
+	  for (int t = 0; t < 3; t++) { int k = 0;
+	    for (int j = 0; j < 7; j++, c++) { uint8_t *p = big[t] + k;
+	      p[0]='a'; p[1]='r'; p[2]='6'; p[3]=255; p[4]=0x00; memset(p+5, 0, 4);
+	      p[9]=0; p[10]=0; p[11]=0x07; p[12]=0xE8; memset(p+13, 0x5A, 255-9); k += 259; }
+	    xs[nx++] = (xfer_t){big[t], k}; }
+	  xs[nx++] = (xfer_t){END_IND, sizeof END_IND};
+	  qn = nx; qi = 0; reads = 0; for (int i = 0; i < nx; i++) q[i] = xs[i];
+	  memset(msgs, 0, sizeof msgs); memset(&msgs[1], 0xA5, sizeof msgs[1]);
+	  unsigned long nn = 1; alarm(5); int32_t r2 = PassThruReadMsgs(chan_id, msgs, &nn, 5000); alarm(0);
+	  printf("%-34s rc=%d n=%lu DataSize=%lu\n", "26 > PM_DATA_LEN of chunks", r2, nn, msgs[0].DataSize);
+	  int intact = 1; for (size_t i = 0; i < sizeof msgs[1]; i++) if (((uint8_t *)&msgs[1])[i] != 0xA5) intact = 0;
+	  CHECK(r2 == 0 && nn == 1 && msgs[0].DataSize == PM_DATA_LEN && intact); }
+
+	/* A read timeout must still report the messages completed in this call,
+	   including one that sits in the caller's array while the next is queued. */
+	{ uint8_t b[64]; int k = 0; memcpy(b+k, START_IND, sizeof START_IND); k += sizeof START_IND;
+	  memcpy(b+k, DATA_CHUNK, sizeof DATA_CHUNK); k += sizeof DATA_CHUNK;	/* reply never ends */
+	  n = run("27 start ind + unfinished reply, want 2", 1, (xfer_t[]){{b, k}}, 2, &rc);
+	  CHECK(rc == J2534_ERR_TIMEOUT && n == 1 && msgs[0].RxStatus == 2); }
+
+	{ uint8_t b[96]; int k = 0; memcpy(b+k, START_IND, sizeof START_IND); k += sizeof START_IND;
+	  memcpy(b+k, START_IND, sizeof START_IND); k += sizeof START_IND;
+	  memcpy(b+k, DATA_CHUNK, sizeof DATA_CHUNK); k += sizeof DATA_CHUNK;	/* queued, never ends */
+	  n = run("28 2 start inds + unfinished, want 2", 1, (xfer_t[]){{b, k}}, 2, &rc);
+	  CHECK(rc == J2534_ERR_TIMEOUT && n == 2 && msgs[0].RxStatus == 2 && msgs[1].RxStatus == 2); }
 
 	/* A transfer ending in "ar", with a stale 'e' left in the buffer from an
 	   earlier transfer: must not be taken for an "are" packet (used to hang). */
