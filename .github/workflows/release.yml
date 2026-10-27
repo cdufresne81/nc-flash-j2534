@@ -264,7 +264,7 @@ jobs:
           | File | What it is |
           |---|---|
           | \`nc-flash-j2534-$VER-x64.zip\` | 64-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 64-bit programs (NC Flash). |
-          | \`nc-flash-j2534-$VER-x86.zip\` | 32-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 32-bit programs (RomDrop). Tested with RomDrop (read, full flash, dynamic flash) on a bench ECU. |
+          | \`nc-flash-j2534-$VER-x86.zip\` | 32-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 32-bit programs (RomDrop). Tested with RomDrop: read and full flash. |
           | \`$src\` | Exact libusb source the DLLs were built from (LGPL-2.1). |
           | \`SHA256SUMS.txt\` | SHA-256 of every file above. Each zip also has its own \`SHA256SUMS.txt\` and \`SOURCES.txt\`. |
 
