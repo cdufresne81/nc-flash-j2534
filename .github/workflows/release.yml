@@ -180,8 +180,9 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # Parser unit tests on Linux (libusb stubbed): crafted USB transfers through
-  # PassThruReadMsgs, with AddressSanitizer/UBSan.
+  # Unit tests on Linux (libusb stubbed), with AddressSanitizer/UBSan: crafted
+  # USB transfers through PassThruReadMsgs, and the J2534 interface selection
+  # for the cable without (0403:CC4D) and with (0403:CC4C) an SD card.
   test:
     runs-on: ubuntu-24.04
     steps:
@@ -196,6 +197,12 @@ jobs:
           gcc -g -fsanitize=address,undefined -fno-sanitize-recover=all -w -Ij2534 \
             $(pkg-config --cflags libusb-1.0) tests/test_readmsgs.c -o test_readmsgs
           ./test_readmsgs
+
+      - name: Build and run tests/test_select_interface.c
+        run: |
+          gcc -g -fsanitize=address,undefined -fno-sanitize-recover=all -w -Ij2534 \
+            $(pkg-config --cflags libusb-1.0) tests/test_select_interface.c -o test_select_interface
+          ./test_select_interface
 
   package:
     needs: [build, test]
@@ -275,8 +282,14 @@ jobs:
         run: |
           set -euo pipefail
           src="libusb-$LIBUSB_VERSION-${LIBUSB_SHA::12}-source.tar.gz"
+          # This version's section of CHANGELOG.md ("## v<ver>" up to the next "## "), if any
+          changes="$(awk -v h="## v$VER" '$0 == h {on=1; next} /^## / {on=0} on' j2534/CHANGELOG.md | sed '/./,$!d')"
+          whatsnew=""
+          if [ -n "$changes" ]; then whatsnew="$(printf "**What's new in %s:**\n\n%s\n" "$VER" "$changes")"; fi
           cat > notes.md <<EOF
           Open-source J2534 (PassThru 04.04) driver for the **Tactrix OpenPort 2.0** cable and its clones, over WinUSB + libusb. It replaces Tactrix's \`openport.sys\` + \`op20pt32.dll\`, which Windows 11 blocks since 2026 (Device Manager: Code 39). It is the driver NC Flash uses. Setup, revert, logging and the RomDrop recipe are in the [README](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/README.md).
+
+          $whatsnew
 
           | File | What it is |
           |---|---|
@@ -288,7 +301,7 @@ jobs:
           > [!WARNING]
           > This driver is used to flash engine ECUs. Flashing always carries risk: keep a known-good recovery path (e.g. NC Flash x64 on the same cable) and, if anything goes wrong, set \`J2534_OP2_LOG\` and keep the log.
 
-          Requirements: the cable must be bound to **WinUSB** (NC Flash: Settings > ECU > J2534 > Tactrix OpenPort Driver; manually: Zadig, USB ID 0403:CC4D -> WinUSB). One program at a time can open the cable. No Visual C++ runtime is needed. Nothing is installed system-wide: put the DLLs next to the program that loads them.
+          Requirements: the cable must be bound to **WinUSB** (NC Flash: Settings > ECU > J2534 > Tactrix OpenPort Driver, with an SD card only in an NC Flash version that supports 0403:CC4C; manually: Zadig, USB ID 0403:CC4D, or 0403:CC4C Interface 0 with an SD card in the cable -> WinUSB). One program at a time can open the cable. No Visual C++ runtime is needed. Nothing is installed system-wide: put the DLLs next to the program that loads them.
 
           **Built from:** $GITHUB_REPOSITORY @ \`$GITHUB_SHA\`, libusb v$LIBUSB_VERSION @ \`$LIBUSB_SHA\`, by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
 

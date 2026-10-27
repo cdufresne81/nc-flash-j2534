@@ -6,11 +6,13 @@
   You are free to use this software for any purpose, but please keep
   acknowledge where it came from!
 
-  Before using this library, remove the SD card from the Openport 2.0
+  The Openport 2.0 enumerates as USB 0403:CC4D without an SD card and 0403:CC4C
+  with one; both work, and the SD card's mass-storage interface is never used.
 
   On Linux, USB device requires write permission, add a udev rule entry in /etc/udev/rules.d/
   with the contents such as this to allow write access:
   SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTR{idProduct}=="cc4d", GROUP="dialout", MODE="0666"
+  SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTR{idProduct}=="cc4c", GROUP="dialout", MODE="0666"
   User must be a member of the dialout group on the system
 
   On Windows, the Openport 2.0 system driver has to be changed from the one provided by
@@ -74,7 +76,8 @@ typedef struct _fifo_msg
 
 const char *DELIMITERS = " \r\n";
 const uint16_t VENDOR_ID = 0x0403;
-const uint16_t PRODUCT_ID = 0xcc4d;
+// OpenPort 2.0: 0xcc4d without an SD card, 0xcc4c with one (adds a mass-storage interface)
+const uint16_t PRODUCT_IDS[] = { 0xcc4d, 0xcc4c };
 const uint8_t ISO9141 = 0x33;
 const uint8_t ISO14230 = 0x34;
 const uint8_t CAN = 0x35;
@@ -229,12 +232,67 @@ static void datacopy(PASSTHRU_MSG *dest, const int8_t *src,
 }
 
 /*
-   This open_dev_endpoints function locates the device to open by Vendor and
-   Product.  Opens the device and sets the handle to use, then determines the
-   addresses for the endpoint transmit and receive queues.
+  Pick the OpenPort's J2534 interface from a configuration descriptor: the
+  FIRST interface whose default altsetting is a CDC data interface (class 0x0A)
+  with exactly two endpoints, one bulk IN and one bulk OUT. With an SD card
+  inserted the cable (0403:CC4C) also has a mass-storage interface with two bulk
+  endpoints, so "any interface with 2 endpoints" would send J2534 bytes to the
+  SD card. Returns LIBUSB_SUCCESS and fills *endpoint, or LIBUSB_ERROR_NOT_FOUND.
  */
+static int select_j2534_interface(const struct libusb_config_descriptor *config,
+	endpoint_t *endpoint)
+{
+	uint8_t i = 0;
+	for (; i < config->bNumInterfaces; i++)
+	{
+		const struct libusb_interface *inter = &config->interface[i];
+		int j = 0;
+		for (; j < inter->num_altsetting; j++)
+		{
+			const struct libusb_interface_descriptor *interdesc = &inter->altsetting[j];
+			if (interdesc->bAlternateSetting != 0
+				|| interdesc->bInterfaceClass != LIBUSB_CLASS_DATA
+				|| interdesc->bNumEndpoints != 2)
+				continue;
+			uint8_t addr_in = 0, addr_out = 0, n_in = 0, n_out = 0, k = 0;
+			for (; k < interdesc->bNumEndpoints; k++)
+			{
+				const struct libusb_endpoint_descriptor *epdesc = &interdesc->endpoint[k];
+				if ((epdesc->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) != LIBUSB_TRANSFER_TYPE_BULK)
+					continue;
+				if ((epdesc->bEndpointAddress & LIBUSB_ENDPOINT_IN) == LIBUSB_ENDPOINT_IN)
+				{
+					addr_in = epdesc->bEndpointAddress;
+					n_in++;
+				}
+				else
+				{
+					addr_out = epdesc->bEndpointAddress;
+					n_out++;
+				}
+			}
+			if (n_in == 1 && n_out == 1)
+			{
+				endpoint->intf_num = interdesc->bInterfaceNumber;
+				endpoint->addr_in = addr_in;
+				endpoint->addr_out = addr_out;
+				return LIBUSB_SUCCESS;
+			}
+		}
+	}
+	return LIBUSB_ERROR_NOT_FOUND;
+}
+
+/*
+  This open_dev_endpoints function locates the cable by Vendor and Product
+  (either Product ID: without or with an SD card), selects its J2534 interface,
+  then opens the device and sets the handle to use. Returns a libusb error, or
+  OPEN_NO_J2534_INTF (with *found_pid set) if the cable has no J2534 interface.
+ */
+#define OPEN_NO_J2534_INTF 1
 static int open_dev_endpoints(libusb_device **devs, const ssize_t cnt,
-	const uint16_t vendor_id, const uint16_t product_id, endpoint_t *endpoint)
+	const uint16_t vendor_id, const uint16_t *product_ids, const int n_pids,
+	endpoint_t *endpoint, uint16_t *found_pid)
 {
 	ssize_t x = 0;
 	for (; x < cnt; x++)
@@ -243,51 +301,29 @@ static int open_dev_endpoints(libusb_device **devs, const ssize_t cnt,
 		int r = libusb_get_device_descriptor(devs[x], &desc);
 		if (r != LIBUSB_SUCCESS)
 			return r;
+		if (desc.idVendor != vendor_id)
+			continue;
+		int p = 0;
+		while (p < n_pids && desc.idProduct != product_ids[p])
+			p++;
+		if (p == n_pids)
+			continue;
 
-		if (desc.idVendor == vendor_id && desc.idProduct == product_id)
-		{
-			r = libusb_open(devs[x], &con->dev_handle);
-			if (r != LIBUSB_SUCCESS)
-				return r;
+		*found_pid = desc.idProduct;
+		struct libusb_config_descriptor *config;
+		r = libusb_get_config_descriptor(devs[x], 0, &config);
+		if (r != LIBUSB_SUCCESS)
+			return r;
+		r = select_j2534_interface(config, endpoint);
+		libusb_free_config_descriptor(config);
+		if (r != LIBUSB_SUCCESS)
+			return OPEN_NO_J2534_INTF;
 
-			con->device_id = libusb_get_device_address(devs[x]);
-			struct libusb_config_descriptor *config;
-			r = libusb_get_config_descriptor(devs[x], 0, &config);
-			if (r != LIBUSB_SUCCESS)
-				return r;
-
-			const struct libusb_interface *inter;
-			const struct libusb_interface_descriptor *interdesc;
-			const struct libusb_endpoint_descriptor *epdesc;
-			uint8_t i = 0;
-			for (; i < config->bNumInterfaces; i++)
-			{
-				inter = &config->interface[i];
-				int j = 0;
-				for (; j < inter->num_altsetting; j++)
-				{
-					interdesc = &inter->altsetting[j];
-					if (interdesc->bNumEndpoints == 2)
-					{
-						uint8_t k = 0;
-						for (; k < interdesc->bNumEndpoints; k++)
-						{
-							epdesc = &interdesc->endpoint[k];
-							if ((epdesc->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK)
-							{
-								if ((epdesc->bEndpointAddress & LIBUSB_ENDPOINT_IN) == LIBUSB_ENDPOINT_IN)
-									endpoint->addr_in = epdesc->bEndpointAddress;
-								if ((epdesc->bEndpointAddress & LIBUSB_ENDPOINT_IN) == LIBUSB_ENDPOINT_OUT)
-									endpoint->addr_out = epdesc->bEndpointAddress;
-							}
-						}
-						endpoint->intf_num = interdesc->bInterfaceNumber;
-					}
-				}
-			}
-			libusb_free_config_descriptor(config);
-			return LIBUSB_SUCCESS;
-		}
+		r = libusb_open(devs[x], &con->dev_handle);
+		if (r != LIBUSB_SUCCESS)
+			return r;
+		con->device_id = libusb_get_device_address(devs[x]);
+		return LIBUSB_SUCCESS;
 	}
 	return LIBUSB_ERROR_NO_DEVICE;
 }
@@ -658,8 +694,22 @@ int32_t OP2J2534_CALL PassThruOpen(const void *pName, unsigned long *pDeviceID)
 		return J2534_ERR_DEVICE_NOT_CONNECTED;
 	}
 
-	r = open_dev_endpoints(devs, cnt, VENDOR_ID, PRODUCT_ID, endpoint);
+	uint16_t found_pid = 0;
+	r = open_dev_endpoints(devs, cnt, VENDOR_ID, PRODUCT_IDS,
+		(int)(sizeof PRODUCT_IDS / sizeof PRODUCT_IDS[0]), endpoint, &found_pid);
 	libusb_free_device_list(devs, 1);
+	if (r == OPEN_NO_J2534_INTF)
+	{
+		snprintf(LAST_ERROR, LE_LEN, "OpenPort %04X:%04X has no CDC data interface "
+			"(1 bulk IN + 1 bulk OUT)", VENDOR_ID, found_pid);
+		if (write_log)
+		{
+			snprintf(log_msg, LM_LEN, "\t%s\n", (char *)LAST_ERROR);
+			writelog(log_msg);
+		}
+		open_failed();
+		return J2534_ERR_DEVICE_NOT_CONNECTED;
+	}
 	if (r != LIBUSB_SUCCESS)
 	{
 		if (write_log)
@@ -685,17 +735,20 @@ int32_t OP2J2534_CALL PassThruOpen(const void *pName, unsigned long *pDeviceID)
 		*pDeviceID = con->device_id;
 		if (write_log)
 		{
-			snprintf(log_msg, LM_LEN, "\tDeviceID %lu opened\n", *pDeviceID);
+			snprintf(log_msg, LM_LEN, "\tDeviceID %lu opened (USB %04X:%04X, interface %u, "
+				"EP IN 0x%02X, EP OUT 0x%02X)\n", *pDeviceID, VENDOR_ID, found_pid,
+				endpoint->intf_num, endpoint->addr_in, endpoint->addr_out);
 			writelog(log_msg);
 		}
 	}
 
-	//find out if kernel driver is attached
-	if (libusb_kernel_driver_active(con->dev_handle, 0) == 1)
+	// Linux: detach a kernel driver (cdc_acm) from the J2534 interface only; the
+	// SD card's mass-storage interface is left alone so it stays mounted
+	if (libusb_kernel_driver_active(con->dev_handle, endpoint->intf_num) == 1)
 	{
 		if (write_log)
 			writelog("\tKernel Driver Active\n");
-		if (libusb_detach_kernel_driver(con->dev_handle, 0) == 0) //detach it
+		if (libusb_detach_kernel_driver(con->dev_handle, endpoint->intf_num) == 0) //detach it
 			if (write_log)
 				writelog("\tKernel Driver Detached\n");
 	}

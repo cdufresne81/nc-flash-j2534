@@ -43,13 +43,24 @@ program that loads them, and don't copy them into `C:\Windows\System32` or
 
 ## 1. Put the cable on WinUSB
 
-Close every program that uses the cable first, and remove the SD card from the
-cable if it has one.
+Close every program that uses the cable first.
 
-- **With NC Flash:** Settings > ECU > J2534 > Tactrix OpenPort Driver.
+The cable can keep its microSD card. Without a card it shows up as USB ID
+`0403` `CC4D`; with one, as `0403` `CC4C`, which adds the card as a USB drive.
+The driver only ever uses the cable's J2534 interface (a CDC data interface,
+interface 1), never the card's mass-storage interface. Windows sees the two
+layouts as different devices, so bind WinUSB in the layout you use: if you
+switch between card and no card, do step 1 for each.
+
+- **With NC Flash:** Settings > ECU > J2534 > Tactrix OpenPort Driver. With an
+  SD card in the cable, this needs an NC Flash version that supports
+  `0403` `CC4C`; otherwise bind it manually.
 - **Manually:** run [Zadig](https://zadig.akeo.ie/), Options > List All Devices,
-  pick the OpenPort 2.0 (USB ID `0403` `CC4D`), choose **WinUSB** as the target
-  driver and click Replace Driver / Install Driver.
+  pick the OpenPort 2.0, choose **WinUSB** as the target driver and click
+  Replace Driver / Install Driver. Pick the entry with USB ID `0403` `CC4D`, or
+  with a card, the one with USB ID `0403` `CC4C` and **Interface 0** (the
+  cable's J2534 part, interfaces 0 and 1). Leave the card's entry (Interface 2,
+  USB Mass Storage) as it is.
 
 ### Reverting to the Tactrix driver
 
@@ -113,7 +124,9 @@ setup back.
 Releases are built by [release.yml](.github/workflows/release.yml): libusb
 v1.0.30 and this driver for x64 and x86 with Visual Studio 2022 (v143), static
 CRT. The workflow checks that the DLLs export exactly the 14 `PassThru*`
-functions with undecorated names, and that they load from Python.
+functions with undecorated names, and that they load from Python. Unit tests in
+`tests/` run on Linux against a stubbed libusb (with AddressSanitizer). Changes
+per version are in [CHANGELOG.md](CHANGELOG.md).
 
 To build locally on Windows:
 
@@ -133,7 +146,12 @@ On Linux, install `pkg-config` and libusb 1.0 development headers, then run
 
 ```
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTR{idProduct}=="cc4d", GROUP="dialout", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTR{idProduct}=="cc4c", GROUP="dialout", MODE="0666"
 ```
+
+The first line is the cable without an SD card, the second with one. On open,
+the driver detaches `cdc_acm` from the J2534 interface only; the card stays
+mounted.
 
 ### Registry files in `extras/`
 
