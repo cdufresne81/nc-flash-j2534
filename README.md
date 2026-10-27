@@ -43,7 +43,8 @@ program that loads them, and don't copy them into `C:\Windows\System32` or
 
 ## 1. Put the cable on WinUSB
 
-Unplug any other OpenPort programs first, and remove the SD card from the cable.
+Close every program that uses the cable first, and remove the SD card from the
+cable if it has one.
 
 - **With NC Flash:** Settings > ECU > J2534 > Tactrix OpenPort Driver.
 - **Manually:** run [Zadig](https://zadig.akeo.ie/), Options > List All Devices,
@@ -60,14 +61,16 @@ that block `openport.sys`, the Tactrix driver will show Code 39 again.
 ## 2. Debug log
 
 Set the environment variable `J2534_OP2_LOG` to a file path before starting the
-program, and the driver appends a log of every call and USB transfer to it:
+program. From `PassThruOpen` on, the driver appends every J2534 call and USB
+transfer to that file:
 
 ```bat
 set J2534_OP2_LOG=C:\temp\j2534.log
 romdrop.exe
 ```
 
-Leave it unset for normal use.
+Leave it unset (or set it to `0`) for normal use. The log grows quickly during a
+flash.
 
 ## 3. Using it with RomDrop (experimental)
 
@@ -90,8 +93,10 @@ reads the registry.
    - **The open failed** if you only get P, V, Q. Check the cable is on WinUSB,
      no other program has it open, then look at the `J2534_OP2_LOG` log.
 
-Only one program can use the cable at a time. A second program gets
-`ERR_DEVICE_IN_USE` until the first one closes the cable.
+Only one program can use the cable at a time. While NC Flash or another
+program using this driver has it open, RomDrop's open fails (short menu) until that
+program closes the cable. Within one program, a second `PassThruOpen` returns
+`ERR_DEVICE_IN_USE`.
 
 **Uninstall:** delete `op20pt32.dll` and `libusb-1.0.dll` from RomDrop's
 folder, and revert the cable to the Tactrix driver if you want the original
@@ -106,14 +111,16 @@ functions with undecorated names, and that they load from Python.
 
 To build locally on Windows:
 
-- Build libusb (`msvc\libusb_dll.vcxproj`, configuration `Release-MT`), or
-  download the libusb Windows binaries.
+- Build libusb v1.0.30 (`msvc\libusb_dll.vcxproj`, configuration `Release-MT`;
+  the output lands in `build\v143\<platform>\Release-MT\dll\`), or download
+  the libusb Windows binaries.
 - Copy `libusb.h` into `libusb\include\libusb-1.0\` in this repository, and
   `libusb-1.0.lib` + `libusb-1.0.dll` into `libusb\MS64\Release\dll\` (x64)
   or `libusb\MS32\Release\dll\` (x86).
-- From a "Native Tools Command Prompt for VS":
-  `msbuild j2534\j2534.vcxproj /p:Configuration=Release /p:Platform=x64`
-  (or `/p:Platform=Win32`).
+- From a "Developer Command Prompt for VS 2022":
+  `msbuild j2534\j2534.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143`
+  (or `/p:Platform=Win32`). The project file still names the VS 2019 toolset
+  (v142), hence the override.
 
 On Linux, install `pkg-config` and libusb 1.0 development headers, then run
 `make` in `j2534/`. Give your user access to the cable with a udev rule such as:
@@ -121,6 +128,14 @@ On Linux, install `pkg-config` and libusb 1.0 development headers, then run
 ```
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTR{idProduct}=="cc4d", GROUP="dialout", MODE="0666"
 ```
+
+### Registry files in `extras/`
+
+`extras/j2534_x86.reg` and `extras/j2534_x64.reg` come from upstream. They
+register the DLL under `HKLM\SOFTWARE\...\PassThruSupport.04.04` with the DLL
+in `System32`/`SysWOW64`, for programs that pick their J2534 driver from the
+registry. The releases don't use them, and you don't need them for NC Flash or
+RomDrop. Don't merge them on a PC where EcuFlash relies on the Tactrix entry.
 
 ## Licences
 
