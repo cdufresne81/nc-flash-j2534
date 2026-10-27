@@ -853,6 +853,35 @@ int32_t OP2J2534_CALL PassThruDisconnect(const unsigned long ChannelID)
 }
 
 /*
+  If a cable error packet ("are <code>\r\n") starts at data[*pos], log it and move
+  *pos past it. Returns TRUE if one was skipped. The code is only logged: ReadMsgs
+  keeps reporting a missing reply as a timeout, which hosts rely on to retry.
+ */
+static int skip_are(const uint8_t *data, const int bytes_read, int *pos)
+{
+	int bp = *pos;
+	if (bp + 2 >= bytes_read || data[bp] != 0x61 || data[bp + 1] != 0x72 || data[bp + 2] != 0x65)
+		return FALSE;
+	int end = bp + 3;
+	while (end + 1 < bytes_read && !(data[end] == '\r' && data[end + 1] == '\n'))
+		end++;
+	int terminated = end + 1 < bytes_read;
+	if (!terminated)
+		end = bytes_read;	// no CR LF in this transfer: the rest is the code
+	if (write_log)
+	{
+		unsigned long errnum = 0;
+		int i = bp + 4, digits = 0;
+		for (; i < end && digits < 9 && data[i] >= '0' && data[i] <= '9'; i++, digits++)
+			errnum = errnum * 10 + (data[i] - '0');
+		snprintf(log_msg, LM_LEN, "\t\t\t-- ARE (cable error) %lu, skipped\n", errnum);
+		writelog(log_msg);
+	}
+	*pos = terminated ? end + 2 : bytes_read;
+	return TRUE;
+}
+
+/*
   Read message(s) from a protocol channel.
  */
 int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_MSG *pMsg,
@@ -967,8 +996,18 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 					&& data[bytes_processed + 0] == 0x61		// A
 					&& data[bytes_processed + 1] == 0x72		// R
 					&& (data[bytes_processed + 2] == channel
-						|| data[bytes_processed + 2] == 0x6F))	// O
+						|| data[bytes_processed + 2] == 0x6F	// O
+						|| (data[bytes_processed + 2] == 0x65	// E, only if inside this transfer
+							&& bytes_processed + 2 < bytes_read)))
 				{
+					// A cable error packet: skip it and keep parsing this transfer.
+					if (skip_are(data, bytes_read, &bytes_processed))
+					{
+						pos = bytes_processed + 5;
+						len = bytes_processed + 3;
+						continue;
+					}
+
 					// If third byte equals the channel #, then this is Message data
 					if (data[bytes_processed + 2] == channel)
 					{
@@ -1215,6 +1254,14 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 								pos, len, bytes_processed, bytes_read, rx_buf_idx);
 							writelog(log_msg);
 						}
+					}
+
+					// An "are" right after a message is not more message data: skip it
+					// here so it doesn't start an empty queued message below.
+					while (skip_are(data, bytes_read, &bytes_processed))
+					{
+						pos = bytes_processed + 5;
+						len = bytes_processed + 3;
 					}
 
 					// Check if we have read msg_cnt messages,
