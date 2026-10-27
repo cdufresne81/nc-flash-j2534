@@ -196,6 +196,9 @@ static void datacopy(PASSTHRU_MSG *dest, const int8_t *src,
 {
 	uint32_t i = d_pos;
 	uint32_t dest_idx = dest->DataSize;
+	// Nothing to copy, or no room left: the arithmetic below would wrap.
+	if (s_end <= d_pos || dest_idx >= PM_DATA_LEN)
+		return;
 	uint32_t idx = dest_idx - d_pos;
 	uint32_t limit = PM_DATA_LEN - dest_idx;
 	uint32_t x2_end = s_end - 1;
@@ -882,6 +885,43 @@ static int skip_are(const uint8_t *data, const int bytes_read, int *pos)
 }
 
 /*
+  Packet types that ReadMsgs turns into (part of) a message.
+ */
+static int is_msg_type(const uint8_t t)
+{
+	return t == TX_DONE || t == TX_LB_START_IND || t == NORM_MSG_START_IND
+		|| t == TX_LB_MSG || t == NORM_MSG || t == RX_MSG_END_IND
+		|| t == EXT_ADDR_MSG_END_IND || t == LB_MSG_END_IND;
+}
+
+/*
+  Return the offset of the next packet in data[pos..bytes_read) that ReadMsgs
+  would turn into (part of) a message on this channel, skipping "aro", "are" and
+  packets it ignores; -1 if there is none. ReadMsgs checks this before queueing a
+  new message, so it never queues an empty one (which hid the message already in
+  the caller's array: the call returned 0 messages and the next one a stub).
+ */
+static int next_msg_packet(const uint8_t *data, const int bytes_read, int pos, const int8_t channel)
+{
+	while (pos + 3 < bytes_read && data[pos] == 0x61 && data[pos + 1] == 0x72)
+	{
+		if (data[pos + 2] == 0x6F)	// aro
+		{
+			pos += 5;
+			continue;
+		}
+		if (skip_are(data, bytes_read, &pos))
+			continue;
+		if (data[pos + 2] != channel)
+			return -1;	// ReadMsgs stops at another channel's packet
+		if (data[pos + 3] >= 1 && pos + 4 < bytes_read && is_msg_type(data[pos + 4]))
+			return pos;
+		pos += data[pos + 3] + 4;	// a packet ReadMsgs skips
+	}
+	return -1;
+}
+
+/*
   Read message(s) from a protocol channel.
  */
 int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_MSG *pMsg,
@@ -918,6 +958,7 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 
 	*pNumMsgs = 0;
 	PASSTHRU_MSG *msgBuf = pMsg;	// local copy for pointer arithmetic
+	PASSTHRU_MSG *pEnd = pMsg + msg_cnt;	// msgBuf outside [pMsg, pEnd) = a queued message
 
 	// Any messages in the FIFO queue to send?
 	for (; msg_cnt; msg_cnt--)
@@ -963,6 +1004,12 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 					writelog(log_msg);
 				}
 				snprintf(LAST_ERROR, LE_LEN, "USB data transfer error: %s", libusb_error_name(r));
+				// Still report the messages completed earlier in this call: they are
+				// in pMsg and were dropped from the count before. While a queued message
+				// is being assembled, rx_buf_idx is one short (it is decremented when the
+				// message is queued) but the caller's array is full.
+				*pNumMsgs += ((uintptr_t)msgBuf < (uintptr_t)pMsg || (uintptr_t)msgBuf >= (uintptr_t)pEnd)
+					? msg_cnt : rx_buf_idx;
 				return error_map(r);
 			}
 
@@ -992,7 +1039,7 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 				}
 
 				// Process an expected data packet
-				while (bytes_processed < bytes_read
+				while (bytes_processed + 2 < bytes_read	// "a r x" inside this transfer
 					&& data[bytes_processed + 0] == 0x61		// A
 					&& data[bytes_processed + 1] == 0x72		// R
 					&& (data[bytes_processed + 2] == channel
@@ -1011,8 +1058,22 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 					// If third byte equals the channel #, then this is Message data
 					if (data[bytes_processed + 2] == channel)
 					{
+						// The length byte must be in this transfer; a cut-off header carries
+						// nothing usable.
+						if (bytes_processed + 3 >= bytes_read)
+						{
+							bytes_processed = bytes_read;
+							break;
+						}
+						// Packet bytes after the 4-byte header that are really in this
+						// transfer: data[len] may claim more than arrived. Everything below
+						// reads at most these.
+						int present = bytes_read - (bytes_processed + 4);
+						uint32_t got = present <= 0 ? 0
+							: (data[len] < (uint32_t)present ? data[len] : (uint32_t)present);
+						int has_ts = got >= 5;	// type byte + 4-byte timestamp
 						uint8_t channel_id = data[bytes_processed + 2];
-						uint8_t packet_type = data[bytes_processed + 4];
+						uint8_t packet_type = got >= 1 ? data[bytes_processed + 4] : 0xFF;
 						int8_t *msg_type = "";
 						unsigned long dataSize = 0;
 
@@ -1020,11 +1081,13 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 						// TxDone Msg 0x10
 						if (packet_type == TX_DONE)
 						{
-							msgBuf->Timestamp = parse_ts(data + pos);
+							msgBuf->Timestamp = has_ts ? parse_ts(data + pos) : 0;
 							if (channel_id == ISO15765)	// CAN message
 							{
-								datacopy(msgBuf, data, 4, pos, (data[len] - 1));
-								dataSize = msgBuf->DataSize + (data[len] - 5);
+								datacopy(msgBuf, data, 4, pos, got - 1);
+								dataSize = msgBuf->DataSize + (got > 5 ? got - 5 : 0);
+								if (dataSize > PM_DATA_LEN)
+									dataSize = PM_DATA_LEN;
 								msgBuf->DataSize = dataSize;
 								msgBuf->ExtraDataIndex = 0;
 								msgBuf->RxStatus = 8;	// TX Done
@@ -1054,11 +1117,13 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 						// Start of a TX LB Msg 0xA0 or Normal Msg 0x80 Indication
 						else if (packet_type == TX_LB_START_IND || packet_type == NORM_MSG_START_IND)
 						{
-							msgBuf->Timestamp = parse_ts(data + pos);
+							msgBuf->Timestamp = has_ts ? parse_ts(data + pos) : 0;
 							if (channel_id == CAN || channel_id == ISO15765)	// CAN message
 							{
-								datacopy(msgBuf, data, 4, pos, (data[len] - 1));
-								dataSize = msgBuf->DataSize + (data[len] - 5);
+								datacopy(msgBuf, data, 4, pos, got - 1);
+								dataSize = msgBuf->DataSize + (got > 5 ? got - 5 : 0);
+								if (dataSize > PM_DATA_LEN)
+									dataSize = PM_DATA_LEN;
 								msgBuf->DataSize = dataSize;
 								msgBuf->ExtraDataIndex = 0;
 								msgBuf->RxStatus = 2;	// Msg start indication
@@ -1105,12 +1170,12 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 
 							if (channel_id == CAN || channel_id == ISO15765)	// CAN message
 							{
-								msgBuf->Timestamp = parse_ts(data + pos);
+								msgBuf->Timestamp = has_ts ? parse_ts(data + pos) : 0;
 								// The OpenPort repeats the 4-byte CAN ID at the start of every USB
 								// chunk of a long ISO15765 message; keep it only from the first chunk
 								// (skipped only when it matches the ID already stored).
 								uint32_t skip = 4;
-								if (channel_id == ISO15765 && msgBuf->DataSize >= 4 && data[len] >= 9
+								if (channel_id == ISO15765 && msgBuf->DataSize >= 4 && got >= 9
 									&& memcmp(data + pos + 4, msgBuf->Data, 4) == 0)
 									skip = 8;
 								uint32_t avail = data[len] ? (uint32_t)data[len] - 1 : 0;
@@ -1120,13 +1185,17 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 									datacopy(msgBuf, data, skip, pos, avail);
 									dataSize += avail - skip;
 								}
+								if (dataSize > PM_DATA_LEN)
+									dataSize = PM_DATA_LEN;
 								msgBuf->DataSize = dataSize;
 								msgBuf->ExtraDataIndex = dataSize;
 							}
 							if (channel_id == ISO9141 || channel_id == ISO14230)	// K-line message
 							{
-								datacopy(msgBuf, data, 0, pos, (data[len] - 1));
-								dataSize = msgBuf->DataSize + (data[len] - 1);
+								datacopy(msgBuf, data, 0, pos, got - 1);
+								dataSize = msgBuf->DataSize + (got > 1 ? got - 1 : 0);
+								if (dataSize > PM_DATA_LEN)
+									dataSize = PM_DATA_LEN;
 								msgBuf->DataSize = dataSize;
 								msgBuf->ExtraDataIndex = dataSize;
 							}
@@ -1178,14 +1247,14 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 									msg_type, pos, len, bytes_processed, bytes_read);
 								writelog(log_msg);
 							}
-							msgBuf->Timestamp = parse_ts(data + pos);
+							msgBuf->Timestamp = has_ts ? parse_ts(data + pos) : 0;
 							if (channel_id == CAN || channel_id == ISO15765)	// CAN message
 							{
 								// The OpenPort repeats the 4-byte CAN ID at the start of every USB
 								// chunk of a long ISO15765 message; keep it only from the first chunk
 								// (skipped only when it matches the ID already stored).
 								uint32_t skip = 4;
-								if (channel_id == ISO15765 && msgBuf->DataSize >= 4 && data[len] >= 9
+								if (channel_id == ISO15765 && msgBuf->DataSize >= 4 && got >= 9
 									&& memcmp(data + pos + 4, msgBuf->Data, 4) == 0)
 									skip = 8;
 								uint32_t avail = data[len] ? (uint32_t)data[len] - 1 : 0;
@@ -1195,6 +1264,8 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 									datacopy(msgBuf, data, skip, pos, avail);
 									dataSize += avail - skip;
 								}
+								if (dataSize > PM_DATA_LEN)
+									dataSize = PM_DATA_LEN;
 								msgBuf->DataSize = dataSize;
 								msgBuf->ExtraDataIndex = dataSize;
 								msgBuf->RxStatus = 0;	// RX Indication
@@ -1242,7 +1313,7 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 					}	// End of the AR channel# packet
 
 					// If third byte equals 'O', then this is Acknowledgement data
-					if (data[bytes_processed + 2] == 0x6F)	// O
+					if (bytes_processed + 2 < bytes_read && data[bytes_processed + 2] == 0x6F)	// O
 					{
 						bytes_processed = bytes_processed + 5;
 						pos = bytes_processed + 5;
@@ -1266,7 +1337,20 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 
 					// Check if we have read msg_cnt messages,
 					// if so, pMsg array is full, try to queue the message
-					if (bytes_processed < bytes_read && rx_buf_idx >= msg_cnt)
+					int next = -1;
+					if (bytes_processed < bytes_read && rx_buf_idx >= msg_cnt
+						&& (next = next_msg_packet(data, bytes_read, bytes_processed, channel)) < 0)
+					{
+						// Nothing in the rest of this transfer would become a message.
+						if (write_log)
+						{
+							snprintf(log_msg, LM_LEN, "\tRead message array full, %d bytes remaining, no message in them\n",
+								bytes_read - bytes_processed);
+							writelog(log_msg);
+						}
+						bytes_processed = bytes_read;
+					}
+					else if (bytes_processed < bytes_read && rx_buf_idx >= msg_cnt)
 					{
 						if (write_log)
 						{
@@ -1274,6 +1358,9 @@ int32_t OP2J2534_CALL PassThruReadMsgs(const unsigned long ChannelID, PASSTHRU_M
 								bytes_read - bytes_processed);
 							writelog(log_msg);
 						}
+						bytes_processed = next;
+						pos = bytes_processed + 5;
+						len = bytes_processed + 3;
 
 						// Try to queue the remaining bytes into new PT messages
 						msgBuf = (PASSTHRU_MSG*)malloc(sizeof(PASSTHRU_MSG));
@@ -1858,6 +1945,8 @@ int32_t OP2J2534_CALL PassThruIoctl(const unsigned long ChannelID, const unsigne
 				goto EXIT_IOCTL;
 			}
 
+			if (len > (unsigned long)bytes_read)
+				len = bytes_read;	// never copy past what was received
 			PASSTHRU_MSG *pOutMsg = pOutput;
 			pOutMsg->DataSize = 0;
 			datacopy(pOutMsg, data, 0, 0, len);
