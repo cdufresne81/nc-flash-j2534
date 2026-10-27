@@ -68,7 +68,7 @@ jobs:
       - name: Stage libusb where the driver project expects it
         shell: pwsh
         run: |
-          $src = "libusb-src\build\v143\${{ matrix.platform }}\Release-MT"
+          $src = "libusb-src\build\v143\${{ matrix.platform }}\Release-MT\dll"
           foreach ($f in 'libusb-1.0.lib', 'libusb-1.0.dll') {
             if (-not (Test-Path "$src\$f")) { throw "libusb build output not found: $src\$f" }
           }
