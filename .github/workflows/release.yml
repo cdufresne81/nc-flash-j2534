@@ -1,0 +1,287 @@
+# Builds the Tactrix OpenPort 2.0 J2534 driver (j2534.dll + libusb-1.0.dll) for
+# x64 and x86 from pinned source, checks the exports and loads both DLLs, and
+# packages the release zips.
+#
+# - pull_request / push to master / workflow_dispatch: build + check + zips as
+#   run artifacts (test builds, version "dev-<sha>").
+# - workflow_dispatch with draft_release=vX.Y.Z (from master only), or pushing a
+#   vX.Y.Z tag: also creates a DRAFT GitHub release. A maintainer publishes it.
+#   A release that already exists is left untouched (publishing a draft creates
+#   its tag, which re-runs this workflow).
+name: Build and release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: 'Create a draft release with this tag (e.g. v1.0.0). Empty = test build only.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  LIBUSB_SHA: 87a55632db62c9bdc58cd31d3ccfa673f1bb017f  # libusb v1.0.30, LGPL-2.1
+  LIBUSB_VERSION: '1.0.30'
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            platform: x64
+            libdir: MS64
+            machine: '8664 machine (x64)'
+          - arch: x86
+            platform: Win32
+            libdir: MS32
+            machine: '14C machine (x86)'
+    steps:
+      - name: Checkout J2534 driver source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          path: j2534
+
+      - name: Checkout libusb source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          repository: libusb/libusb
+          ref: ${{ env.LIBUSB_SHA }}
+          path: libusb-src
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce  # v2
+
+      # Release-MT = static CRT, so the DLLs need no Visual C++ redistributable.
+      - name: Build libusb (${{ matrix.arch }})
+        run: msbuild libusb-src\msvc\libusb_dll.vcxproj /m /p:Configuration=Release-MT /p:Platform=${{ matrix.platform }} /p:PlatformToolset=v143
+
+      - name: Stage libusb where the driver project expects it
+        shell: pwsh
+        run: |
+          $src = "libusb-src\build\v143\${{ matrix.platform }}\Release-MT"
+          foreach ($f in 'libusb-1.0.lib', 'libusb-1.0.dll') {
+            if (-not (Test-Path "$src\$f")) { throw "libusb build output not found: $src\$f" }
+          }
+          $inc = New-Item -ItemType Directory -Force j2534\libusb\include\libusb-1.0
+          $out = New-Item -ItemType Directory -Force j2534\libusb\${{ matrix.libdir }}\Release\dll
+          Copy-Item libusb-src\libusb\libusb.h $inc
+          Copy-Item "$src\libusb-1.0.lib", "$src\libusb-1.0.dll" $out
+
+      - name: Build J2534 driver (${{ matrix.arch }})
+        run: msbuild j2534\j2534\j2534.vcxproj /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:PlatformToolset=v143 /p:SolutionDir=${{ github.workspace }}\j2534\ /p:OutDir=${{ github.workspace }}\out\
+
+      - name: Collect DLLs
+        shell: pwsh
+        run: |
+          if (-not (Test-Path out\j2534.dll)) { throw "j2534.dll build output not found" }
+          $dist = New-Item -ItemType Directory -Force dist
+          Copy-Item out\j2534.dll, j2534\libusb\${{ matrix.libdir }}\Release\dll\libusb-1.0.dll $dist
+
+      - name: Check exports, architecture and dependencies (dumpbin)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          $expected = 'Open Close Connect Disconnect ReadMsgs WriteMsgs StartPeriodicMsg StopPeriodicMsg StartMsgFilter StopMsgFilter SetProgrammingVoltage ReadVersion GetLastError Ioctl'.Split(' ') | ForEach-Object { "PassThru$_" }
+          $fail = $false
+
+          Write-Host "===== dumpbin /exports dist\j2534.dll (${{ matrix.arch }}) ====="
+          $exp = & $dumpbin /nologo /exports dist\j2534.dll
+          if ($LASTEXITCODE) { throw "dumpbin /exports failed" }
+          $exp | Write-Host
+          $names = @($exp | ForEach-Object { if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)') { $Matches[1] } })
+          $missing = @($expected | Where-Object { $names -cnotcontains $_ })
+          $extra = @($names | Where-Object { $expected -cnotcontains $_ })
+          if ($missing) { Write-Host "::error::missing exports: $($missing -join ', ')"; $fail = $true }
+          if ($extra) { Write-Host "::error::unexpected (e.g. decorated) exports: $($extra -join ', ')"; $fail = $true }
+          if (-not $missing -and -not $extra) { Write-Host "OK: exactly the 14 J2534 functions, undecorated" }
+
+          foreach ($dll in 'j2534.dll', 'libusb-1.0.dll') {
+            $hdr = & $dumpbin /nologo /headers "dist\$dll"
+            if (-not ($hdr -match [regex]::Escape('${{ matrix.machine }}'))) { Write-Host "::error::$dll is not ${{ matrix.machine }}"; $fail = $true }
+            Write-Host "===== dumpbin /dependents dist\$dll ====="
+            $dep = & $dumpbin /nologo /dependents "dist\$dll"
+            $dep | Write-Host
+            $crt = @($dep | Where-Object { $_ -match '(?i)^\s+(vcruntime|msvcp|ucrtbase|api-ms-win-crt)' })
+            if ($crt) { Write-Host "::error::$dll needs the VC++ runtime: $($crt -join ', ')"; $fail = $true }
+          }
+          if ($fail) { exit 1 }
+
+      - name: Set up Python (${{ matrix.arch }})
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
+
+      # WinDLL = __stdcall. On x86, ctypes raises if the callee's stack cleanup does
+      # not match, so this also proves the calling convention. No cable on the
+      # runner: PassThruOpen must fail cleanly with ERR_DEVICE_NOT_CONNECTED (8).
+      - name: Load test (${{ matrix.arch }} Python ctypes)
+        shell: pwsh
+        run: |
+          @'
+          import ctypes, os, platform, struct, sys
+          print(sys.version, platform.machine(), struct.calcsize("P") * 8, "bit")
+          d = ctypes.WinDLL(os.path.abspath(r"dist\j2534.dll"))
+          names = "Open Close Connect Disconnect ReadMsgs WriteMsgs StartPeriodicMsg StopPeriodicMsg StartMsgFilter StopMsgFilter SetProgrammingVoltage ReadVersion GetLastError Ioctl".split()
+          missing = [n for n in names if not hasattr(d, "PassThru" + n)]
+          if missing:
+              sys.exit("missing: %s" % missing)
+          print("all 14 J2534 functions resolve by undecorated name")
+          dev = ctypes.c_ulong(0)
+          rc = d.PassThruOpen(None, ctypes.byref(dev))
+          err = ctypes.create_string_buffer(256)
+          d.PassThruGetLastError(err)
+          print("PassThruOpen(NULL) without a cable ->", rc, err.value.decode(errors="replace"))
+          if rc != 8:
+              sys.exit("expected ERR_DEVICE_NOT_CONNECTED (8)")
+          '@ | Set-Content load_test.py
+          python load_test.py
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: dlls-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # only used by the draft-release step
+    steps:
+      - name: Checkout J2534 driver source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          path: j2534
+
+      - name: Checkout libusb source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          repository: libusb/libusb
+          ref: ${{ env.LIBUSB_SHA }}
+          path: libusb-src
+
+      - name: Download DLLs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          path: dlls
+
+      - name: Work out the version and whether to draft a release
+        id: ver
+        env:
+          INPUT_TAG: ${{ github.event.inputs.draft_release }}
+        run: |
+          tag=""
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -n "$INPUT_TAG" ]]; then
+            [[ "$GITHUB_REF" == refs/heads/master ]] || { echo "::error::draft releases are made from master only"; exit 1; }
+            tag="$INPUT_TAG"
+          fi
+          if [[ -n "$tag" ]]; then
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag must look like v1.2.3, got '$tag'"; exit 1; }
+            ver="${tag#v}"
+          else
+            ver="dev-${GITHUB_SHA::7}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag='$tag' ver='$ver'"
+
+      - name: Package zips, libusb source and checksums
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          set -euo pipefail
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          mkdir -p release
+          for arch in x64 x86; do
+            name="nc-flash-j2534-$VER-$arch"
+            mkdir -p "stage/$name"
+            cp "dlls/dlls-$arch/j2534.dll" "dlls/dlls-$arch/libusb-1.0.dll" "stage/$name/"
+            cp j2534/LICENSE "stage/$name/LICENSE-j2534.txt"
+            cp libusb-src/COPYING "stage/$name/COPYING-libusb.txt"
+            {
+              echo "nc-flash-j2534 $VER ($arch)"
+              echo "j2534.dll      from https://github.com/$GITHUB_REPOSITORY @ $GITHUB_SHA"
+              echo "libusb-1.0.dll from https://github.com/libusb/libusb @ $LIBUSB_SHA (v$LIBUSB_VERSION, LGPL-2.1)"
+              echo "               corresponding source: libusb-$LIBUSB_VERSION-${LIBUSB_SHA::12}-source.tar.gz on the release page,"
+              echo "               or https://github.com/libusb/libusb/tree/$LIBUSB_SHA"
+              echo "Built by $run_url"
+            } > "stage/$name/SOURCES.txt"
+            (cd "stage/$name" && sha256sum j2534.dll libusb-1.0.dll LICENSE-j2534.txt COPYING-libusb.txt SOURCES.txt > SHA256SUMS.txt && cat SHA256SUMS.txt)
+            (cd stage && zip -X -r "../release/$name.zip" "$name")
+          done
+          (cd libusb-src && git archive --format=tar.gz --prefix="libusb-$LIBUSB_VERSION/" -o "../release/libusb-$LIBUSB_VERSION-${LIBUSB_SHA::12}-source.tar.gz" HEAD)
+          (cd release && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Write release notes
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          set -euo pipefail
+          src="libusb-$LIBUSB_VERSION-${LIBUSB_SHA::12}-source.tar.gz"
+          cat > notes.md <<EOF
+          Open-source J2534 (PassThru 04.04) driver for the **Tactrix OpenPort 2.0** cable and its clones, over WinUSB + libusb. It replaces Tactrix's \`openport.sys\` + \`op20pt32.dll\`, which Windows 11 blocks since 2026 (Device Manager: Code 39). It is the driver NC Flash uses. Setup, revert, logging and the RomDrop recipe are in the [README](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/README.md).
+
+          | File | What it is |
+          |---|---|
+          | \`nc-flash-j2534-$VER-x64.zip\` | 64-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 64-bit programs (NC Flash). |
+          | \`nc-flash-j2534-$VER-x86.zip\` | 32-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 32-bit programs (RomDrop). **Experimental: not yet flash-tested with RomDrop.** |
+          | \`$src\` | Exact libusb source the DLLs were built from (LGPL-2.1). |
+          | \`SHA256SUMS.txt\` | SHA-256 of every file above. Each zip also has its own \`SHA256SUMS.txt\` and \`SOURCES.txt\`. |
+
+          > [!WARNING]
+          > This driver is used to flash engine ECUs. The x86 build has **not yet completed a RomDrop read or flash**. Use it with RomDrop at your own risk, and only with a known-good recovery path (e.g. NC Flash x64 on the same cable).
+
+          Requirements: the cable must be bound to **WinUSB** (NC Flash: Settings > ECU > J2534 > Tactrix OpenPort Driver; manually: Zadig, USB ID 0403:CC4D -> WinUSB). One program at a time can open the cable. No Visual C++ runtime is needed. Nothing is installed system-wide: put the DLLs next to the program that loads them.
+
+          **Built from:** $GITHUB_REPOSITORY @ \`$GITHUB_SHA\`, libusb v$LIBUSB_VERSION @ \`$LIBUSB_SHA\`, by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
+
+          **Licences:** j2534.dll is BSD-3-Clause (\`LICENSE-j2534.txt\`). libusb-1.0.dll is LGPL-2.1 (\`COPYING-libusb.txt\`); its complete corresponding source is attached as \`$src\` and is also at https://github.com/libusb/libusb/tree/$LIBUSB_SHA. You may replace \`libusb-1.0.dll\` with your own build of libusb.
+
+          **SHA-256:**
+          \`\`\`
+          $(cat release/SHA256SUMS.txt)
+          \`\`\`
+          EOF
+          cat notes.md
+
+      - name: Upload zips
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nc-flash-j2534-${{ steps.ver.outputs.ver }}
+          path: |
+            release/
+            notes.md
+          if-no-files-found: error
+
+      - name: Create draft release
+        if: steps.ver.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; leaving it untouched."
+            exit 0
+          fi
+          # --target: for a draft the tag is created only when it is published.
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "nc-flash-j2534 $TAG" --notes-file notes.md release/*
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
