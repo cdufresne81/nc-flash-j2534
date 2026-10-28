@@ -2,6 +2,10 @@
 
 The release notes of each version include its section from this file.
 
+## v1.1.0
+
+- **Put the cable on WinUSB without NC Flash or Zadig.** Each zip now has a `driver-setup` folder: run `Install WinUSB driver.cmd` (one administrator prompt), and `Restore Tactrix driver.cmd` to undo it. It is NC Flash's own driver switch, shipped unchanged, so it handles the cable with or without an SD card, and NC Flash and `driver-setup` can each undo the other. The window shows the switch's log and the cable's state afterwards; declining the administrator prompt changes nothing. It refuses to run while RomDrop, EcuFlash or NC Flash is open (switching mid-flash would cut the flash short), and asks before replacing a Tactrix driver that still works. The driver itself is unchanged from v1.0.3.
+
 ## v1.0.3
 
 - **The cable now works with an SD card in it.** The OpenPort 2.0 with a microSD card inserted enumerates as USB `0403:CC4C` with an extra mass-storage interface; the driver now opens it as well as `0403:CC4D` (no card).
