@@ -19,7 +19,6 @@
 param([Parameter(Mandatory = $true)][ValidateSet('Install', 'Restore')][string]$Action)
 
 $ErrorActionPreference = 'Stop'
-# Loading the switch below defines its own $Action, so keep ours as $mode.
 $mode = $Action
 $scriptPath = Join-Path $PSScriptRoot 'openport_winusb.ps1'
 $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -45,9 +44,14 @@ if ($busy) {
     Stop-Setup "Close $($busy -join ', ') first: changing the cable's driver during a read or a flash would cut it short."
 }
 
-# The switch's own functions, without running it (no -Action), for the cable state.
-. $scriptPath
-$before = Get-CableState
+function Read-CableState {
+    # The switch's own Get-CableState. Loaded in a child scope: loading the
+    # switch also binds its own -Action/-LogName, which must not overwrite
+    # this script's variables (PowerShell names ignore case).
+    & { . $scriptPath; Get-CableState }
+}
+
+$before = Read-CableState
 Write-Host "Cable now: $before"
 if ($mode -eq 'Install') {
     if ($before -eq 'not plugged in') { Stop-Setup 'Plug the cable in (it can keep its SD card), then run this again.' }
@@ -106,7 +110,7 @@ if ($hasLog) {
     Get-Content -LiteralPath $logPath | ForEach-Object { Write-Host "  $_" }
     Write-Host ''
 }
-$after = Get-CableState
+$after = Read-CableState
 switch ($code) {
     { $_ -in 0, 3 } {
         $restart = if ($code -eq 3) { ' Restart Windows to finish.' } else { '' }
