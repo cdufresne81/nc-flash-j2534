@@ -53,14 +53,23 @@ interface 1), never the card's mass-storage interface. Windows sees the two
 layouts as different devices, so bind WinUSB in the layout you use: if you
 switch between card and no card, do step 1 for each.
 
+While the cable is on WinUSB, programs that use Tactrix's driver (EcuFlash,
+RomDrop without this driver, NC Flash 2.23 and earlier) can't use it. Revert
+it (below) to go back.
+
 - **Without NC Flash:** extract the whole zip (either one), open its
-  `driver-setup` folder and run **`Install WinUSB driver.cmd`**. Windows asks
-  for administrator rights once; the window then shows what was done. It
-  handles the cable with or without an SD card, and leaves the card working
-  as a USB drive.
-- **With NC Flash:** Settings > ECU > J2534 > Tactrix OpenPort Driver. With an
-  SD card in the cable, this needs an NC Flash version that supports
-  `0403` `CC4C`; otherwise use `driver-setup`.
+  `driver-setup` folder and run **`Install WinUSB driver.cmd`**, with the
+  cable plugged in. Windows asks for administrator rights once; the window
+  then shows what was done. It handles the cable with or without an SD card,
+  and leaves the card working as a USB drive. It refuses to run while
+  RomDrop, EcuFlash or NC Flash is open, and asks first if Tactrix's driver
+  still works on your PC.
+  - Windows may warn that the file comes from the internet: right-click the
+    zip > Properties > **Unblock** before extracting it, or on a "Windows
+    protected your PC" screen click More info > Run anyway.
+- **With NC Flash** (2.24 beta or later): Settings > ECU > J2534 > Tactrix
+  OpenPort Driver. With an SD card in the cable, this needs an NC Flash
+  version that supports `0403` `CC4C`; otherwise use `driver-setup`.
 - **With Zadig:** run [Zadig](https://zadig.akeo.ie/), Options > List All Devices,
   pick the OpenPort 2.0, choose **WinUSB** as the target driver and click
   Replace Driver / Install Driver. Pick the entry with USB ID `0403` `CC4D`, or
@@ -68,8 +77,9 @@ switch between card and no card, do step 1 for each.
   cable's J2534 part, interfaces 0 and 1). Leave the card's entry (Interface 2,
   USB Mass Storage) as it is.
 
-`driver-setup` is the same switch NC Flash runs, shipped unchanged from
-[NC Flash](https://github.com/cdufresne81/nc-flash/blob/master/packaging/openport/openport_winusb.ps1)
+`driver-setup` is the same switch NC Flash 2.24 beta and later runs, shipped
+unchanged from
+[NC Flash](https://github.com/cdufresne81/nc-flash/blob/03f9ac73035133c4f1df82421041d7ee7a562d42/packaging/openport/openport_winusb.ps1)
 (`SOURCES.txt` names the commit), so either one can undo the other. What it
 does:
 
@@ -89,7 +99,8 @@ does:
 Run **`driver-setup\Restore Tactrix driver.cmd`**. It removes the WinUSB setup
 (whether made by `driver-setup`, NC Flash or Zadig) and its certificate, and
 the cable goes back to Tactrix's driver. On Windows 11 builds that block
-`openport.sys`, the Tactrix driver will show Code 39 again.
+`openport.sys`, the Tactrix driver will show Code 39 again. Without Tactrix's
+software installed, the cable is left with no driver.
 
 ## 2. Debug log
 

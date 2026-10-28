@@ -237,6 +237,16 @@ jobs:
             if ($errors) { $errors | ForEach-Object { Write-Host "::error::$f : $_" }; exit 1 }
             Write-Host "OK: $f parses"
           }
+          # run_setup.ps1 calls it with -Action Install|Restore and -LogName standalone_<guid>.log.
+          $ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $switch), [ref]$null, [ref]$null)
+          $params = @{}
+          foreach ($p in $ast.ParamBlock.Parameters) { $params[$p.Name.VariablePath.UserPath] = $p }
+          $set = $params['Action'].Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' }
+          $values = @($set.PositionalArguments | ForEach-Object { $_.Value })
+          if (-not ($values -contains 'Install' -and $values -contains 'Restore')) { Write-Host "::error::$switch -Action doesn't accept Install and Restore"; exit 1 }
+          $pattern = ($params['LogName'].Attributes | Where-Object { $_.TypeName.Name -eq 'ValidatePattern' }).PositionalArguments[0].Value
+          if ('standalone_0123456789abcdef0123456789abcdef.log' -notmatch $pattern) { Write-Host "::error::$switch -LogName rejects run_setup.ps1's log names"; exit 1 }
+          Write-Host 'OK: the switch takes -Action Install/Restore and -LogName standalone_<guid>.log'
           . (Resolve-Path $switch)
           foreach ($fn in 'Install-WinUsb', 'Restore-Tactrix', 'Get-CableState') {
             if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { Write-Host "::error::$switch has no $fn"; exit 1 }
@@ -355,15 +365,15 @@ jobs:
 
           | File | What it is |
           |---|---|
-          | \`nc-flash-j2534-$VER-x64.zip\` | 64-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 64-bit programs (NC Flash). |
-          | \`nc-flash-j2534-$VER-x86.zip\` | 32-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 32-bit programs (RomDrop). Tested with RomDrop: read and full flash. |
+          | \`nc-flash-j2534-$VER-x64.zip\` | 64-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 64-bit programs (NC Flash), and \`driver-setup\`. |
+          | \`nc-flash-j2534-$VER-x86.zip\` | 32-bit \`j2534.dll\` + \`libusb-1.0.dll\`, for 32-bit programs (RomDrop), and \`driver-setup\`. Tested with RomDrop: read and full flash. |
           | \`$src\` | Exact libusb source the DLLs were built from (LGPL-2.1). |
           | \`SHA256SUMS.txt\` | SHA-256 of every file above. Each zip also has its own \`SHA256SUMS.txt\` and \`SOURCES.txt\`. |
 
           > [!WARNING]
           > This driver is used to flash engine ECUs. Flashing always carries risk: keep a known-good recovery path (e.g. NC Flash x64 on the same cable) and, if anything goes wrong, set \`J2534_OP2_LOG\` and keep the log.
 
-          Requirements: the cable must be bound to **WinUSB**. Without NC Flash: extract a zip and run \`driver-setup\\Install WinUSB driver.cmd\` (one administrator prompt; \`Restore Tactrix driver.cmd\` undoes it). It is the same switch NC Flash runs (Settings > ECU > J2534 > Tactrix OpenPort Driver), with or without an SD card in the cable. Zadig also works (USB ID 0403:CC4D, or 0403:CC4C Interface 0 with an SD card -> WinUSB). One program at a time can open the cable. No Visual C++ runtime is needed. The DLLs aren't installed system-wide: put them next to the program that loads them.
+          Requirements: the cable must be bound to **WinUSB**. Without NC Flash: extract a zip and run \`driver-setup\\Install WinUSB driver.cmd\` (one administrator prompt; \`Restore Tactrix driver.cmd\` undoes it). It is the same switch NC Flash 2.24 beta and later runs (Settings > ECU > J2534 > Tactrix OpenPort Driver), with or without an SD card in the cable. While the cable is on WinUSB, programs that use Tactrix's driver (EcuFlash, NC Flash 2.23 and earlier) can't use it. Zadig also works (USB ID 0403:CC4D, or 0403:CC4C Interface 0 with an SD card -> WinUSB). One program at a time can open the cable. No Visual C++ runtime is needed. The DLLs aren't installed system-wide: put them next to the program that loads them.
 
           **Built from:** $GITHUB_REPOSITORY @ \`$GITHUB_SHA\`, libusb v$LIBUSB_VERSION @ \`$LIBUSB_SHA\`, by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
 
