@@ -47,10 +47,16 @@ if ($Action -eq 'Install') {
 Write-Host 'Windows will ask for administrator rights.'
 Write-Host ''
 
+# Process.Start rather than Start-Process: in Windows PowerShell 5.1 the latter
+# hides the Windows error, so a declined UAC prompt looked like a launch failure.
+$psi = New-Object Diagnostics.ProcessStartInfo $powershell
+$psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+$psi.Verb = 'runas'
+$psi.UseShellExecute = $true
+$psi.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
 try {
-    $p = Start-Process -FilePath $powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList `
-        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded
-    $code = $p.ExitCode
+    $p = [Diagnostics.Process]::Start($psi)
+    if ($p) { $p.WaitForExit(); $code = $p.ExitCode } else { $code = 4 }
 } catch {
     $e = $_.Exception
     while ($e -and -not ($e -is [ComponentModel.Win32Exception])) { $e = $e.InnerException }

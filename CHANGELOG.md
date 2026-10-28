@@ -4,7 +4,7 @@ The release notes of each version include its section from this file.
 
 ## v1.1.0
 
-- **Put the cable on WinUSB without NC Flash or Zadig.** Each zip now has a `driver-setup` folder: run `Install WinUSB driver.cmd` (one administrator prompt), and `Restore Tactrix driver.cmd` to undo it. It is NC Flash's own driver switch, shipped unchanged, so it handles the cable with or without an SD card, and NC Flash and `driver-setup` can each undo the other. The driver itself is unchanged from v1.0.3.
+- **Put the cable on WinUSB without NC Flash or Zadig.** Each zip now has a `driver-setup` folder: run `Install WinUSB driver.cmd` (one administrator prompt), and `Restore Tactrix driver.cmd` to undo it. It is NC Flash's own driver switch, shipped unchanged, so it handles the cable with or without an SD card, and NC Flash and `driver-setup` can each undo the other. Declining the administrator prompt changes nothing. The driver itself is unchanged from v1.0.3.
 
 ## v1.0.3
 
